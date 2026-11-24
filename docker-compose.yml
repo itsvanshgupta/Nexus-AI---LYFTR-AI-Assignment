@@ -1,0 +1,42 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: nexus-ai-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - LLM_API_KEYS=${LLM_API_KEYS:-key1,key2}
+      - DATABASE_URL=sqlite:////data/app.db
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      - ENABLE_FAILURE_SIMULATION=${ENABLE_FAILURE_SIMULATION:-true}
+      - LLM_MODEL=${LLM_MODEL:-gemini/gemini-2.5-flash}
+      - CACHE_TYPE=${CACHE_TYPE:-local}
+    volumes:
+      - sqlite_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/health\")' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=${VITE_API_URL:-http://localhost:8000}
+    container_name: nexus-ai-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  sqlite_data:
+    name: nexus_ai_sqlite_data
