@@ -1,8 +1,16 @@
+import os
 import time
+import asyncio
 import logging
 from typing import List, Dict, Any, Optional, Tuple
 from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
+
+# LiteLLM otherwise fetches its model cost catalogue while importing.  Using
+# the bundled catalogue keeps startup reliable when a developer is offline and
+# avoids delaying the API before it can serve its first request.
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "true")
+
 import litellm
 from litellm.caching.caching import Cache
 
@@ -88,6 +96,13 @@ def extract_reply_and_tokens(response: Any, model: str, messages: List[Dict[str,
     return reply, input_tokens, output_tokens
 
 
+def normalize_model_name(model_name: str) -> str:
+    """Ensure Gemini models use 'gemini/' provider prefix so LiteLLM targets Google AI Studio."""
+    if model_name.startswith("gemini-") and not model_name.startswith("gemini/"):
+        return f"gemini/{model_name}"
+    return model_name
+
+
 async def execute_chat(
     model: str,
     messages: List[Dict[str, str]],
@@ -97,6 +112,7 @@ async def execute_chat(
     Executes chat completion with LiteLLM caching, ordered API key failover,
     and failover simulation support.
     """
+    model = normalize_model_name(model)
     simulations = parse_simulation_header(simulate_header)
     keys = settings.key_pool
 
@@ -147,43 +163,52 @@ async def execute_chat(
             last_error = f"Simulated failure {sim_code} on {key_id}"
             continue
 
-        try:
-            logger.info(f"Attempting inference with {key_id}...")
-            # Execute completion in threadpool
-            response = await run_in_threadpool(
-                litellm.completion,
-                model=model,
-                messages=messages,
-                api_key=api_key,
-                caching=False # We manage storing in litellm.cache explicitly below
-            )
+        for attempt in range(2):
+            try:
+                logger.info(f"Attempting inference with {key_id} (attempt {attempt + 1})...")
+                # Execute completion in threadpool
+                response = await run_in_threadpool(
+                    litellm.completion,
+                    model=model,
+                    messages=messages,
+                    api_key=api_key,
+                    caching=False # We manage storing in litellm.cache explicitly below
+                )
 
-            reply, input_tokens, output_tokens = extract_reply_and_tokens(response, model, messages)
-            latency_ms = max(1, int((time.perf_counter() - t_start) * 1000))
+                reply, input_tokens, output_tokens = extract_reply_and_tokens(response, model, messages)
+                latency_ms = max(1, int((time.perf_counter() - t_start) * 1000))
 
-            # Store in LiteLLM's built-in cache for subsequent identical requests
-            if litellm.cache is not None:
-                try:
-                    litellm.cache.add_cache(response, model=model, messages=messages)
-                except Exception as e:
-                    logger.warning(f"Error saving to cache: {e}")
+                # Store in LiteLLM's built-in cache for subsequent identical requests
+                if litellm.cache is not None:
+                    try:
+                        litellm.cache.add_cache(response, model=model, messages=messages)
+                    except Exception as e:
+                        logger.warning(f"Error saving to cache: {e}")
 
-            metadata = ChatMetadata(
-                resolution_source="LIVE_INFERENCE",
-                model=model,
-                latency_ms=latency_ms,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                key_id=key_id,
-                fallback_attempts=fallback_attempts
-            )
-            return reply, metadata
+                metadata = ChatMetadata(
+                    resolution_source="LIVE_INFERENCE",
+                    model=model,
+                    latency_ms=latency_ms,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    key_id=key_id,
+                    fallback_attempts=fallback_attempts
+                )
+                return reply, metadata
 
-        except Exception as e:
-            logger.warning(f"Inference failed with {key_id}: {str(e)}")
-            fallback_attempts += 1
-            last_error = str(e)
-            continue
+            except Exception as e:
+                err_str = str(e)
+                # If Google returns transient 503 high demand spike and this is not a failure simulation, wait briefly and retry once
+                is_transient = "503" in err_str or "high demand" in err_str.lower() or "temporary" in err_str.lower()
+                if attempt == 0 and is_transient and not simulations:
+                    logger.info(f"Transient error on {key_id}: {err_str[:80]}... Retrying in 1s")
+                    await asyncio.sleep(1.0)
+                    continue
+
+                logger.warning(f"Inference failed with {key_id}: {err_str}")
+                fallback_attempts += 1
+                last_error = err_str
+                break
 
     # If all configured keys failed
     logger.error(f"All providers exhausted. Last error: {last_error}")

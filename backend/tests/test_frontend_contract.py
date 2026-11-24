@@ -1,5 +1,6 @@
 import glob
 import re
+from pathlib import Path
 
 REQUIRED_TESTIDS = [
     "chat-input",
@@ -16,7 +17,8 @@ REQUIRED_TESTIDS = [
 def test_frontend_data_testids():
     """Verify that all required data-testid attributes exist in frontend source."""
     found = set()
-    jsx_files = glob.glob("frontend/src/**/*.jsx", recursive=True)
+    project_root = Path(__file__).resolve().parents[2]
+    jsx_files = glob.glob(str(project_root / "frontend" / "src" / "**" / "*.jsx"), recursive=True)
     assert len(jsx_files) > 0, "No frontend JSX files found"
 
     for file_path in jsx_files:

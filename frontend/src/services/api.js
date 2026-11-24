@@ -32,7 +32,16 @@ export async function sendChatMessage({ sessionId, message, systemPrompt, simula
     body: JSON.stringify(payload),
   });
 
-  const data = await res.json();
+  // A proxy or development server can occasionally return a non-JSON error
+  // page. Keep the UI's error state useful instead of throwing a JSON parse
+  // exception that hides the original HTTP failure.
+  const rawBody = await res.text();
+  let data = {};
+  try {
+    data = rawBody ? JSON.parse(rawBody) : {};
+  } catch {
+    data = { detail: rawBody || `Request failed with status ${res.status}` };
+  }
 
   if (!res.ok) {
     const errorMsg = typeof data.detail === 'string' 
