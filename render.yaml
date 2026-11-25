@@ -12,13 +12,15 @@ services:
       - key: DATABASE_URL
         value: sqlite:////data/app.db
       - key: ALLOWED_ORIGINS
-        value: "*"
+        value: https://nexus-ai-lyftr-ai-assignment.vercel.app
       - key: ENABLE_FAILURE_SIMULATION
         value: "true"
       - key: LLM_MODEL
-        value: gemini/gemini-2.5-flash
+        value: gemini/gemini-3.5-flash-lite
       - key: CACHE_TYPE
         value: local
+      - key: LITELLM_LOCAL_MODEL_COST_MAP
+        value: "true"
     disk:
       name: sqlite-data
       mountPath: /data

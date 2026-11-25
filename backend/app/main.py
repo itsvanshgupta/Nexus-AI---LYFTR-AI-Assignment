@@ -1,88 +1,77 @@
 import logging
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
 from app.database import init_db
+from app.routes import chat, health, sessions
 from app.services.llm_service import init_litellm_cache
-from app.routes import health, chat, sessions
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("nexus-ai")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup actions
     logger.info("Initializing SQLite database...")
     init_db()
     logger.info("Initializing LiteLLM cache...")
     init_litellm_cache()
-    logger.info(f"Loaded {len(settings.key_pool)} LLM keys into pool.")
+    logger.info("Loaded %s LLM keys into pool.", len(settings.key_pool))
     yield
-    # Shutdown actions
     logger.info("Nexus AI backend shutting down...")
 
 
+# The contract has three public API routes; disable FastAPI's extra docs/schema routes.
 app = FastAPI(
     title="Nexus AI Backend",
     version="1.0.0",
     description="LLM Chatbot API with Key Failover and Response Caching",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
-# CORS Middleware
-origins = settings.cors_origins
-if not origins:
-    origins = ["*"]
-
+origins = settings.cors_origins or ["*"]
+allow_all_origins = "*" in origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins if "*" not in origins else ["*"],
-    allow_credentials=True if "*" not in origins else False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"] if allow_all_origins else origins,
+    allow_credentials=not allow_all_origins,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-Simulate-Failure"],
 )
 
-# Route registration
 app.include_router(health.router)
 app.include_router(chat.router)
 app.include_router(sessions.router)
 
 
-from fastapi.encoders import jsonable_encoder
-
-# Global Error Handlers to guarantee clean JSON detail responses
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """Ensure standard 422 format with readable detail."""
     return JSONResponse(
         status_code=422,
-        content={"detail": jsonable_encoder(exc.errors())}
+        content={"detail": jsonable_encoder(exc.errors())},
     )
 
 
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    """Guarantee JSON responses for all HTTP errors."""
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"detail": exc.detail}
-    )
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    """Catch-all to prevent raw stack trace exposure."""
-    logger.exception(f"Unhandled server error: {exc}")
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error"}
-    )
+    # Keep tracebacks in server logs only; never expose internals to clients.
+    logger.exception("Unhandled server error: %s", exc)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
